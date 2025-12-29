@@ -161,6 +161,8 @@ class BERTopic:
         ctfidf_model: TfidfTransformer = None,
         representation_model: BaseRepresentation = None,
         verbose: bool = False,
+        reduction_method: str = "agglomerative",
+        vendi_epsilon: float = 1e-5
     ):
         """BERTopic initialization.
 
@@ -229,7 +231,11 @@ class BERTopic:
             representation_model: Pass in a model that fine-tunes the topic representations
                                   calculated through c-TF-IDF. Models from `bertopic.representation`
                                   are supported.
+            reduction_method: The method used for topic reduction when nr_topics is specified. 
+                              Options: "agglomerative" (default), "vendi"
+            vendi_epsilon: epsilon for vendi clustering in topic reduction
         """
+
         # Topic-based parameters
         if top_n_words > 100:
             logger.warning(
@@ -245,6 +251,12 @@ class BERTopic:
         self.seed_topic_list = seed_topic_list
         self.zeroshot_topic_list = zeroshot_topic_list
         self.zeroshot_min_similarity = zeroshot_min_similarity
+
+        # Topic Reduction
+        if reduction_method not in ["agglomerative", "vendi"]:
+            raise ValueError(f"reduction_method must be 'agglomerative' or 'vendi', got '{reduction_method}'")
+        self.reduction_method = reduction_method
+        self.vendi_epsilon = vendi_epsilon
 
         # Embedding model
         self.language = language if not embedding_model else None
@@ -4576,7 +4588,15 @@ class BERTopic:
 
         if isinstance(self.nr_topics, int):
             if self.nr_topics < initial_nr_topics:
-                documents = self._reduce_to_n_topics(documents, use_ctfidf)
+                if self.reduction_method == "vendi":
+                    documents = self._reduce_with_vendi(
+                        documents, 
+                        use_ctfidf, 
+                        target_k=self.nr_topics,
+                        epsilon=self.vendi_epsilon
+                    )
+                elif self.reduction_method == "agglomerative":
+                    documents = self._reduce_to_n_topics(documents, use_ctfidf)
             else:
                 logger.info(
                     f"Topic reduction - Number of topics ({self.nr_topics}) is equal or higher than the clustered topics({len(self.get_topics())})."
@@ -4719,6 +4739,104 @@ class BERTopic:
         documents = self._sort_mappings_by_frequency(documents)
         self._extract_topics(documents, mappings=mappings, verbose=self.verbose)
         self._update_topic_size(documents)
+        return documents
+
+    def _reduce_with_vendi(
+        self,
+        documents: pd.DataFrame,
+        use_ctfidf: bool = False,
+        target_k: int = None,
+        epsilon: float = None,
+    ) -> pd.DataFrame:
+        """Reduce topics using Vendi diversity score-based merging.
+
+        This method uses the Vendi₂ diversity score to iteratively merge topics
+        while preserving semantic diversity. Topics are merged greedily by selecting
+        the pair that maximizes (or minimizes the loss of) the Vendi diversity score.
+
+        Arguments:
+            documents: Dataframe with documents and their corresponding IDs and Topics
+            use_ctfidf: Whether to use c-TF-IDF embeddings for topic similarity.
+                       If False, semantic embeddings from the embedding model are used.
+            target_k: Target number of topics. If provided, merging continues until
+                     this number is reached.
+            epsilon: Stopping threshold for diversity loss. If provided without target_k,
+                    merging stops when ΔVendi < -epsilon.
+
+        Returns:
+            documents: Updated dataframe with documents and the reduced number of Topics
+
+        Examples:
+        Reduce to a fixed number of topics:
+        ```python
+        topic_model.reduce_topics(docs, nr_topics=50, reduction_method="vendi")
+        ```
+
+        Or use epsilon-stopping for automatic reduction:
+        ```python
+        topic_model.reduce_topics(docs, nr_topics="vendi_auto", vendi_epsilon=1e-4)
+        ```
+        """
+        from bertopic._vendi_reduction import VendiReducer
+
+        # Get initial topics
+        topics = documents.Topic.tolist().copy()
+
+        # Extract topic embeddings (exclude outliers)
+        topic_embeddings = self.topic_embeddings_.copy()
+        topic_sizes_dict = {i: self.topic_sizes_[i] for i in range(len(self.topic_embeddings_))}
+
+        # Exclude outlier topic from Vendi reduction
+        if self._outliers:
+            # Keep outlier topic separate
+            outlier_embedding = topic_embeddings[0:1]
+            topic_embeddings = topic_embeddings[1:]
+            outlier_size = topic_sizes_dict.pop(-1, 0)
+
+        # Initialize Vendi reducer
+        vendi_reducer = VendiReducer(epsilon=epsilon if epsilon else 1e-5, verbose=self.verbose)
+
+        # Perform Vendi-based reduction
+        cumulative_mapping = vendi_reducer.reduce(
+            embeddings=topic_embeddings,
+            topic_sizes=topic_sizes_dict,
+            target_k=target_k,
+            epsilon=epsilon,
+        )
+
+        # Add back outlier mapping
+        if self._outliers:
+            cumulative_mapping[-1] = -1
+
+        # Map original topics to reduced topics
+        mapped_topics = {old: cumulative_mapping.get(old, old) for old in set(topics)}
+
+        # Create extended mappings for weighted embedding averaging
+        basic_mappings = defaultdict(list)
+        for old_topic, new_topic in sorted(mapped_topics.items()):
+            basic_mappings[new_topic].append(old_topic)
+
+        mappings = {
+            topic_to: {
+                "topics_from": topics_from,
+                "topic_sizes": [self.topic_sizes_[topic] for topic in topics_from],
+            }
+            for topic_to, topics_from in basic_mappings.items()
+        }
+
+        # Update documents with new topic assignments
+        new_topics = [mapped_topics[topic] for topic in topics]
+        documents.Topic = new_topics
+        self._update_topic_size(documents)
+
+        # Register mappings and reorder by frequency
+        self.topic_mapper_.add_mappings(mapped_topics, topic_model=self)
+        documents = self._sort_mappings_by_frequency(documents)
+
+        # Update topic representations and embeddings
+        self._extract_topics(documents, mappings=mappings, verbose=self.verbose)
+        self._update_topic_size(documents)
+
         return documents
 
     def _sort_mappings_by_frequency(self, documents: pd.DataFrame) -> pd.DataFrame:
