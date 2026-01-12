@@ -4778,13 +4778,16 @@ class BERTopic:
         ```
         """
         from bertopic._vendi_reduction import VendiReducer
+        from bertopic._utils import select_topic_representation
 
         # Get initial topics
         topics = documents.Topic.tolist().copy()
-
+        topic_embeddings = select_topic_representation(
+            self.c_tf_idf_, self.topic_embeddings_, use_ctfidf, output_ndarray=True
+        )[0]
+        
         # Extract topic embeddings (exclude outliers)
-        topic_embeddings = self.topic_embeddings_.copy()
-        topic_sizes_dict = {i: self.topic_sizes_[i] for i in range(len(self.topic_embeddings_))}
+        topic_sizes_dict = {topic_id: size for topic_id, size in self.topic_sizes_.items()}
 
         # Exclude outlier topic from Vendi reduction
         if self._outliers:
