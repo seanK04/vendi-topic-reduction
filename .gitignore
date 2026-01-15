@@ -86,3 +86,26 @@ venv.bak/
 
 # mkdocs
 site/
+
+# Experiment results and data
+experiments/results/
+!experiments/results/.gitkeep
+experiments/results/embeddings/
+experiments/results/*/
+
+# Large datasets (don't upload to GitHub!)
+*.pkl
+*.npy
+*.h5
+*.hdf5
+
+# SLURM logs
+logs/
+*.out
+*.err
+
+# Model checkpoints
+*.pt
+*.pth
+*.bin
+*.safetensors
