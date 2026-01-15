@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Optional, Literal
 from bertopic import BERTopic
 from sentence_transformers import SentenceTransformer
-from experiments.progress_wrappers import ProgressUMAP, ProgressHDBSCAN
+from experiments.utils.progress_wrappers import ProgressUMAP, ProgressHDBSCAN
 
 @dataclass
 class ModelConfig:
