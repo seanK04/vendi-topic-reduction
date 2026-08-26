@@ -19,8 +19,8 @@ import yaml
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from experiments.data_loaders import prepare_dataset, print_dataset_stats
-from experiments.protocols import run_protocol_1, run_protocol_2, run_protocol_4
+from experiments.utils.data_loaders import prepare_dataset, print_dataset_stats
+from experiments.protocols import run_protocol_1, run_protocol_2, run_protocol_3, run_protocol_4, run_protocol_6
 
 AVAILABLE_PROTOCOLS = {
     "p1": {
@@ -29,14 +29,24 @@ AVAILABLE_PROTOCOLS = {
         "description": "Compare Vendi vs Agglomerative across c-TF-IDF and SBERT embeddings",
     },
     "p2": {
-        "name": "Protocol 2: VTR vs. Direct HDBSCAN Tuning",
+        "name": "Protocol 2: VTR vs. LLM-Assisted Reduction",
         "function": run_protocol_2,
+        "description": "Compare VTR against iterative LLM-based merging (cost vs quality analysis)",
+    },
+    "p3": {
+        "name": "Protocol 3: VTR vs. Direct HDBSCAN Tuning",
+        "function": run_protocol_3,
         "description": "Compare outlier assignment rates between VTR and direct HDBSCAN parameter tuning",
     },
     "p4": {
         "name": "Protocol 4: Robustness & Sensitivity Analysis",
         "function": run_protocol_4,
         "description": "Test robustness across multiple initial HDBSCAN configurations",
+    },
+    "p6": {
+        "name": "Protocol 6: q-Value Sensitivity Ablation",
+        "function": run_protocol_6,
+        "description": "Ablation study: how does the Vendi Score order q affect topic reduction quality?",
     },
 }
 

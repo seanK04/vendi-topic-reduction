@@ -1,0 +1,18 @@
+# Protocol 6: q-Value Sensitivity Ablation
+# Tests how the Vendi Score order q affects topic reduction quality
+
+dataset:
+  name: "20newsgroups"
+  n_samples: null
+
+protocol: "p6"
+
+protocol_6:
+  q_values: [1.0]
+  target_k_values: [25, 50, 100]
+  seeds: [42, 43, 44]
+
+output:
+  dir: "experiments/results/p6_q1"
+  save_metadata: true
+  filename: p6_20NG_q1

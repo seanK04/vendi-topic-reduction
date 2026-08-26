@@ -1,212 +1,206 @@
 """
-Protocol 2: Vendi Topic Reduction vs. HDBSCAN Direct Tuning
-    This protocol compares Vendi Topic Reduction against the default "direct" method 
-    of re-clustering documents via HDBSCAN parameter tuning, with a focus on outlier assignment rates.
-    
-    Procedure:
-        1. Fit a high-resolution Base Model (low min_cluster_size, many topics)
-        2. Create target states by fitting direct HDBSCAN models with varying parameters
-        3. For each target state, record k_target and outlier rate
-        4. Reduce the Base Model using VTR to match k_target
-        5. Compare outlier rates and quality metrics between methods
+Protocol 2: Vendi Topic Reduction vs. LLM-Assisted Reduction
+
+This protocol compares VTR against iterative LLM-based merging.
+Note: VTR results can be taken from Protocol 1 for comparison.
+This implementation focuses on LLM reduction benchmarking.
+
+Procedure:
+    1. Fit initial BERTopic model with fixed configuration
+    2. Reduce to target_k using LLM-based iterative merging
+    3. Track computational cost (API calls, time, etc.)
+    4. Evaluate quality metrics
+    5. Save results for comparison with P1 VTR results
 """
 import time
 import pandas as pd
 from pathlib import Path
-from typing import List
+from typing import List, Optional
+import gc
 
-from experiments.data_loaders import DatasetConfig
-from experiments.models import create_bertopic_model, ModelConfig
-from experiments.metrics import evaluate_model
+from experiments.utils.data_loaders import DatasetConfig
+from experiments.utils.models import create_bertopic_model, ModelConfig
+from experiments.utils.metrics import evaluate_model
+from bertopic._llm_reduction import LLMReducer
 
 
 def run_protocol_2(
     dataset: DatasetConfig,
-    base_min_cluster_size: int = 10,
-    direct_configs: List[dict] = None,
-    seed: int = 42,
-    save_dir: str = "experiments/results/p2_hdbscan_comparison",
+    target_k_values: List[int] = [25, 50, 100],
+    seeds: List[int] = [42],
+    min_cluster_size: int = 15,
+    llm_client=None,
+    llm_model_name: str = "gemma3:12b",
+    top_keywords: int = 5,
+    save_dir: str = "experiments/results/p2_llm_comparison",
     output_filename: str = None
 ) -> pd.DataFrame:
     """
-    Protocol 2: VTR vs Direct HDBSCAN Tuning
+    Protocol 2: LLM-Assisted Topic Reduction Benchmarking
     
-    Tests hypothesis: VTR can reach low topic counts while preserving document assignments,
-    whereas direct HDBSCAN tuning often forces many documents into the outlier category.
+    Tests LLM-based iterative merging strategy where an LLM identifies
+    overlapping topic pairs based on their top 10 keywords.
+    
+    Key Metrics:
+    - Quality: Coherence (C_v, NPMI), Diversity (Word Uniqueness, Vendi)
+    - Cost: API calls, total time, average time per call
+    
+    Note: For comparison with VTR, use results from Protocol 1.
     
     Args:
         dataset: DatasetConfig with docs, embeddings, labels
-        base_min_cluster_size: min_cluster_size for high-resolution base model
-        direct_configs: List of dicts with 'min_cluster_size' and 'selection_method' for direct HDBSCAN
-        seed: Random seed for reproducibility
+        target_k_values: List of target topic counts
+        seeds: List of random seeds for reproducibility
+        min_cluster_size: HDBSCAN min_cluster_size parameter for initial clustering
+        llm_client: LLM client with .generate(prompt) method
+        llm_model_name: Name of LLM model (e.g., "gemma3:12b")
         save_dir: Directory to save results
         output_filename: Optional custom filename for CSV output
 
     Returns:
-        DataFrame comparing VTR vs direct HDBSCAN across different target states
-    """    
+        DataFrame with LLM reduction results and computational costs
+    """
     print("="*80)
-    print("PROTOCOL 2: Vendi Topic Reduction vs. Direct HDBSCAN Tuning")
+    print("PROTOCOL 2: LLM-Assisted Topic Reduction")
     print("="*80)
     print(f"Dataset: {dataset.name}")
-    print(f"Base model min_cluster_size: {base_min_cluster_size}")
-    print(f"Direct HDBSCAN configurations: {len(direct_configs)}")
-    print(f"Seed: {seed}")
+    print(f"Target k values: {target_k_values}")
+    print(f"Seeds: {seeds}")
+    print(f"LLM Model: {llm_model_name}")
+    print(f"\nNote: For VTR comparison, use Protocol 1 results")
     print("="*80 + "\n")
+
+    if llm_client is None:
+        raise ValueError("llm_client must be provided. Pass a client with .generate(prompt) method.")
 
     save_path = Path(save_dir)
     save_path.mkdir(parents=True, exist_ok=True)
     results = []
 
-    # Step 1: Fit high-resolution base model
-    print(f"\n{'='*80}")
-    print(f"STEP 1: Fitting High-Resolution Base Model")
-    print(f"{'='*80}")
-    
-    base_config = ModelConfig(
-        name=f"base_mcs{base_min_cluster_size}_seed{seed}",
-        min_cluster_size=base_min_cluster_size,
-        cluster_selection_method="eom",
-        reduction_method="vendi",  # Will use VTR for reductions
-        vendi_epsilon=1e-5,
-        seed=seed
-    )
-    
-    print(f"  Fitting base model (min_cluster_size={base_min_cluster_size})...", end='', flush=True)
-    start_time = time.time()
-    base_model = create_bertopic_model(base_config)
-    base_topics, base_probs = base_model.fit_transform(dataset.docs, dataset.embeddings)
-    base_fit_time = time.time() - start_time
-    base_k = len(set(base_topics) - {-1})
-    base_outliers = sum(1 for t in base_topics if t == -1)
-    base_outlier_ratio = base_outliers / len(base_topics)
-    print(f" ✓ {base_fit_time:.1f}s")
-    print(f"  Base model: k={base_k}, outliers={base_outliers} ({base_outlier_ratio:.2%})")
-    
-    # Step 2: Test each direct HDBSCAN configuration
-    print(f"\n{'='*80}")
-    print(f"STEP 2: Direct HDBSCAN Configurations")
-    print(f"{'='*80}")
-    
-    for i, config_dict in enumerate(direct_configs, 1):
-        min_cs = config_dict["min_cluster_size"]
-        sel_method = config_dict["selection_method"]
+    # Initialize LLM reducer
+    llm_reducer = LLMReducer(llm_client, model_name=llm_model_name, top_keywords=top_keywords)
+
+    total_runs = len(seeds) * len(target_k_values)
+    current_run = 0
+
+    for seed in seeds:
+        print(f"\n{'='*80}")
+        print(f"Seed: {seed}")
+        print(f"{'='*80}")
         
-        print(f"\n[Configuration {i}/{len(direct_configs)}]: min_cluster_size={min_cs}, selection={sel_method}")
-        
-        # Fit direct HDBSCAN model
-        print(f"  Fitting direct HDBSCAN model...", end='', flush=True)
-        direct_config = ModelConfig(
-            name=f"direct_mcs{min_cs}_{sel_method}_seed{seed}",
-            min_cluster_size=min_cs,
-            cluster_selection_method=sel_method,
-            reduction_method="agglomerative",  # Placeholder
+        # Fit base model once per seed
+        print(f"\n[BASE MODEL - Seed {seed}]")
+        base_config = ModelConfig(
+            name=f"base_llm_seed{seed}",
+            reduction_method="agglomerative",  # Placeholder (not used)
+            min_cluster_size=min_cluster_size,
             seed=seed
         )
         
-        direct_start = time.time()
-        direct_model = create_bertopic_model(direct_config)
-        direct_topics, direct_probs = direct_model.fit_transform(dataset.docs, dataset.embeddings)
-        direct_fit_time = time.time() - direct_start
-        direct_k = len(set(direct_topics) - {-1})
-        direct_outliers = sum(1 for t in direct_topics if t == -1)
-        direct_outlier_ratio = direct_outliers / len(direct_topics)
-        print(f" ✓ {direct_fit_time:.1f}s")
-        print(f"    Direct HDBSCAN: k={direct_k}, outliers={direct_outliers} ({direct_outlier_ratio:.2%})")
+        print(f"  Fitting BERTopic...", end='', flush=True)
+        start_time = time.time()
+        base_model = create_bertopic_model(base_config)
+        base_topics, base_probs = base_model.fit_transform(dataset.docs, dataset.embeddings)
+        fit_time = time.time() - start_time
+        initial_k = len(set(base_topics) - {-1})
+        print(f" ✓ {fit_time:.1f}s (k={initial_k})")
         
-        # Evaluate direct model
-        print(f"  Evaluating direct model...", end='', flush=True)
-        direct_metrics = evaluate_model(direct_model, dataset.docs)
-        print(f" ✓")
-        
-        # Record direct HDBSCAN results
-        direct_result = {
-            "config_num": i,
-            "method": "direct_hdbscan",
-            "min_cluster_size": min_cs,
-            "selection_method": sel_method,
-            "seed": seed,
-            "base_k": base_k,
-            "target_k": direct_k,
-            "final_k": direct_k,
-            "fit_time": direct_fit_time,
-            "reduction_time": 0.0,
-            "total_time": direct_fit_time,
-            "n_outliers": direct_outliers,
-            "outlier_ratio": direct_outlier_ratio,
-            **direct_metrics
-        }
-        results.append(direct_result)
-        
-        # Step 3: Reduce base model using VTR to match target_k
-        print(f"  Reducing base model with VTR to k={direct_k}...", end='', flush=True)
-        
-        # Refit base model for VTR
-        vtr_config = ModelConfig(
-            name=f"vtr_target{direct_k}_seed{seed}",
-            min_cluster_size=base_min_cluster_size,
-            cluster_selection_method="eom",
-            reduction_method="vendi",
-            vendi_epsilon=1e-5,
-            seed=seed
-        )
-        
-        vtr_refit_start = time.time()
-        vtr_model = create_bertopic_model(vtr_config)
-        vtr_model.fit_transform(dataset.docs, dataset.embeddings)
-        vtr_refit_time = time.time() - vtr_refit_start
-        
-        # Reduce to target_k
-        if len(set(vtr_model.topics_) - {-1}) > direct_k:
-            vtr_reduction_start = time.time()
-            vtr_model.reduce_topics(dataset.docs, nr_topics=direct_k, use_ctfidf=True)
-            vtr_reduction_time = time.time() - vtr_reduction_start
-            vtr_k = len(set(vtr_model.topics_) - {-1})
-            vtr_outliers = sum(1 for t in vtr_model.topics_ if t == -1)
-            vtr_outlier_ratio = vtr_outliers / len(vtr_model.topics_)
-            print(f" ✓ {vtr_reduction_time:.1f}s")
-            print(f"    VTR: k={vtr_k}, outliers={vtr_outliers} ({vtr_outlier_ratio:.2%})")
-        else:
-            vtr_reduction_time = 0.0
-            vtr_k = len(set(vtr_model.topics_) - {-1})
-            vtr_outliers = sum(1 for t in vtr_model.topics_ if t == -1)
-            vtr_outlier_ratio = vtr_outliers / len(vtr_model.topics_)
-            print(f" (skipped, already at k={vtr_k})")
-        
-        # Evaluate VTR model
-        print(f"  Evaluating VTR model...", end='', flush=True)
-        vtr_metrics = evaluate_model(vtr_model, dataset.docs)
-        print(f" ✓")
-        
-        # Record VTR results
-        vtr_result = {
-            "config_num": i,
-            "method": "vtr",
-            "min_cluster_size": base_min_cluster_size,
-            "selection_method": "eom",
-            "seed": seed,
-            "base_k": base_k,
-            "target_k": direct_k,
-            "final_k": vtr_k,
-            "fit_time": vtr_refit_time,
-            "reduction_time": vtr_reduction_time,
-            "total_time": vtr_refit_time + vtr_reduction_time,
-            "n_outliers": vtr_outliers,
-            "outlier_ratio": vtr_outlier_ratio,
-            **vtr_metrics
-        }
-        results.append(vtr_result)
-        
-        # Print comparison
-        outlier_diff = direct_outlier_ratio - vtr_outlier_ratio
-        print(f"\n  COMPARISON:")
-        print(f"    Outlier Ratio Δ: {outlier_diff:+.2%} (Direct - VTR)")
-        print(f"    C_v Δ: {vtr_metrics['coherence_cv'] - direct_metrics['coherence_cv']:+.4f}")
-        print(f"    Vendi₂ Δ: {vtr_metrics['vendi_diversity_2'] - direct_metrics['vendi_diversity_2']:+.2f}")
-    
+        # Test LLM reduction for each target_k
+        for target_k in target_k_values:
+            current_run += 1
+            print(f"\n{'='*80}")
+            print(f"[Run {current_run}/{total_runs}] LLM Reduction to k={target_k}")
+            print(f"{'='*80}")
+            
+            try:
+                # Refit model for clean state
+                print(f"  Refitting base model...", end='', flush=True)
+                refit_start = time.time()
+                llm_config = ModelConfig(
+                    name=f"llm_k{target_k}_seed{seed}",
+                    reduction_method="agglomerative",  # Not used for LLM
+                    min_cluster_size=min_cluster_size,
+                    seed=seed
+                )
+                llm_model = create_bertopic_model(llm_config)
+                llm_model.fit_transform(dataset.docs, dataset.embeddings)
+                refit_time = time.time() - refit_start
+                refit_k = len(set(llm_model.topics_) - {-1})
+                print(f" ✓ {refit_time:.1f}s (k={refit_k})")
+                
+                if refit_k <= target_k:
+                    print(f"  Skipped: Base model already at k={refit_k} ≤ {target_k}")
+                    # Still evaluate and save results
+                    llm_stats = {
+                        'total_api_calls': 0,
+                        'total_llm_time': 0.0,
+                        'avg_llm_time': 0.0,
+                        'merge_history': []
+                    }
+                    reduction_time = 0.0
+                    final_k = refit_k
+                else:
+                    # Perform LLM reduction
+                    print(f"  Starting LLM reduction ({refit_k} → {target_k})...")
+                    reduction_start = time.time()
+                    llm_stats = llm_reducer.reduce(llm_model, dataset.docs, target_k)
+                    reduction_time = time.time() - reduction_start
+                    final_k = len(set(llm_model.topics_) - {-1})
+                    
+                    print(f"  ✓ LLM Reduction complete: {reduction_time:.1f}s")
+                    print(f"    API Calls: {llm_stats['total_api_calls']}")
+                    print(f"    Avg LLM Time: {llm_stats['avg_llm_time']:.2f}s/call")
+                    print(f"    Final k: {final_k}")
+                
+                # Evaluate model
+                print(f"  Evaluating...", end='', flush=True)
+                eval_start = time.time()
+                metrics = evaluate_model(llm_model, dataset.docs)
+                eval_time = time.time() - eval_start
+                print(f" ✓ {eval_time:.1f}s")
+                
+                # Collect results
+                result = {
+                    "method": "llm",
+                    "seed": seed,
+                    "llm_model": llm_model_name,
+                    "target_k": target_k,
+                    "initial_k": refit_k,
+                    "final_k": final_k,
+                    "fit_time": refit_time,
+                    "reduction_time": reduction_time,
+                    "total_time": refit_time + reduction_time,
+                    "api_calls": llm_stats['total_api_calls'],
+                    "total_llm_time": llm_stats['total_llm_time'],
+                    "avg_llm_time": llm_stats['avg_llm_time'],
+                    "n_merges": len(llm_stats['merge_history']),
+                    **metrics
+                }
+                results.append(result)
+                
+                # Print key metrics
+                print(f"\n  METRICS:")
+                print(f"    Coherence: C_v={metrics.get('coherence_cv', 0):.4f}, NPMI={metrics.get('coherence_npmi', 0):.4f}")
+                print(f"    Diversity: WU@10={metrics.get('word_uniqueness_10', 0):.4f}, Vendi₂={metrics.get('vendi_diversity_2', 0):.2f}")
+                print(f"    Cost: {llm_stats['total_api_calls']} calls, {reduction_time:.1f}s total")
+
+                del llm_model
+                if 'llm_stats' in locals():
+                    del llm_stats                
+                gc.collect()
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+            except Exception as e:
+                print(f"\n  ✗ Error: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+
     # Convert to DataFrame
     df = pd.DataFrame(results)
-    
+
     # Save results
     if output_filename:
         csv_filename = output_filename if output_filename.endswith('.csv') else f"{output_filename}.csv"
@@ -216,83 +210,74 @@ def run_protocol_2(
     csv_path = save_path / csv_filename
     df.to_csv(csv_path, index=False)
     print(f"\n✓ Results saved to {csv_path}")
-    
+
     # Print summary
     print_protocol_2_summary(df)
-    
+
     return df
 
 
 def print_protocol_2_summary(df: pd.DataFrame):
-    """Print summary statistics for Protocol 2 results."""
+    """Print summary statistics for Protocol 2 LLM reduction results."""
     print("\n" + "="*80)
-    print("PROTOCOL 2 SUMMARY: VTR vs. Direct HDBSCAN")
+    print("PROTOCOL 2 SUMMARY: LLM-Assisted Topic Reduction")
     print("="*80)
     
-    # Group by method
-    direct_df = df[df['method'] == 'direct_hdbscan']
-    vtr_df = df[df['method'] == 'vtr']
-    
-    print("\n[DIRECT HDBSCAN] - Across all configurations:")
-    print(f"  Mean Outlier Ratio:      {direct_df['outlier_ratio'].mean():6.2%} ± {direct_df['outlier_ratio'].std():.2%}")
-    print(f"  Mean k:                  {direct_df['final_k'].mean():6.1f} ± {direct_df['final_k'].std():.1f}")
-    print(f"  Coherence C_v:           {direct_df['coherence_cv'].mean():6.4f} ± {direct_df['coherence_cv'].std():.4f}")
-    print(f"  Coherence NPMI:          {direct_df['coherence_npmi'].mean():6.4f} ± {direct_df['coherence_npmi'].std():.4f}")
-    print(f"  Word Uniqueness @10:     {direct_df['word_uniqueness_10'].mean():6.4f} ± {direct_df['word_uniqueness_10'].std():.4f}")
-    print(f"  Vendi q=2.0:             {direct_df['vendi_diversity_2'].mean():6.2f} ± {direct_df['vendi_diversity_2'].std():.2f}")
-    
-    print("\n[VENDI TOPIC REDUCTION] - Across all configurations:")
-    print(f"  Mean Outlier Ratio:      {vtr_df['outlier_ratio'].mean():6.2%} ± {vtr_df['outlier_ratio'].std():.2%}")
-    print(f"  Mean k:                  {vtr_df['final_k'].mean():6.1f} ± {vtr_df['final_k'].std():.1f}")
-    print(f"  Coherence C_v:           {vtr_df['coherence_cv'].mean():6.4f} ± {vtr_df['coherence_cv'].std():.4f}")
-    print(f"  Coherence NPMI:          {vtr_df['coherence_npmi'].mean():6.4f} ± {vtr_df['coherence_npmi'].std():.4f}")
-    print(f"  Word Uniqueness @10:     {vtr_df['word_uniqueness_10'].mean():6.4f} ± {vtr_df['word_uniqueness_10'].std():.4f}")
-    print(f"  Vendi q=2.0:             {vtr_df['vendi_diversity_2'].mean():6.2f} ± {vtr_df['vendi_diversity_2'].std():.2f}")
+    for target_k in sorted(df['target_k'].unique()):
+        print(f"\n{'='*80}")
+        print(f"Target k={target_k}")
+        print(f"{'='*80}")
+        
+        subset = df[df['target_k'] == target_k]
+        
+        if len(subset) > 0:
+            print(f"\n[LLM REDUCTION] (n={len(subset)} runs)")
+            print(f"  Final k:             {subset['final_k'].mean():6.1f} ± {subset['final_k'].std():.1f}")
+            print(f"  Coherence C_v:       {subset['coherence_cv'].mean():6.4f} ± {subset['coherence_cv'].std():.4f}")
+            print(f"  Coherence NPMI:      {subset['coherence_npmi'].mean():6.4f} ± {subset['coherence_npmi'].std():.4f}")
+            print(f"  Word Unique @10:     {subset['word_uniqueness_10'].mean():6.4f} ± {subset['word_uniqueness_10'].std():.4f}")
+            print(f"  Word Unique @25:     {subset['word_uniqueness_25'].mean():6.4f} ± {subset['word_uniqueness_25'].std():.4f}")
+            print(f"  Vendi q=2.0:         {subset['vendi_diversity_2'].mean():6.2f} ± {subset['vendi_diversity_2'].std():.2f}")
+            print(f"\n  COMPUTATIONAL COST:")
+            print(f"  API Calls:           {subset['api_calls'].mean():6.1f} ± {subset['api_calls'].std():.1f}")
+            print(f"  Total LLM Time:      {subset['total_llm_time'].mean():6.1f}s ± {subset['total_llm_time'].std():.1f}s")
+            print(f"  Avg Time/Call:       {subset['avg_llm_time'].mean():6.2f}s ± {subset['avg_llm_time'].std():.2f}s")
+            print(f"  Reduction Time:      {subset['reduction_time'].mean():6.1f}s ± {subset['reduction_time'].std():.1f}s")
+            print(f"  Total Time:          {subset['total_time'].mean():6.1f}s ± {subset['total_time'].std():.1f}s")
     
     print("\n" + "="*80)
-    print("DETAILED COMPARISON BY TARGET STATE")
+    print("COMPARISON TABLE")
     print("="*80)
+    print(f"{'Target k':<10} {'C_v':>10} {'NPMI':>10} {'WU@10':>10} {'Vendi₂':>10} {'Calls':>10} {'Time(s)':>10}")
+    print("-" * 80)
     
-    for config_num in sorted(df['config_num'].unique()):
-        direct_row = df[(df['config_num'] == config_num) & (df['method'] == 'direct_hdbscan')].iloc[0]
-        vtr_row = df[(df['config_num'] == config_num) & (df['method'] == 'vtr')].iloc[0]
+    for target_k in sorted(df['target_k'].unique()):
+        subset = df[df['target_k'] == target_k]
         
-        print(f"\nConfig {config_num}: min_cluster_size={direct_row['min_cluster_size']}, "
-              f"selection={direct_row['selection_method']}, k={direct_row['target_k']}")
-        print("-" * 80)
-        print(f"{'Metric':<25} {'Direct HDBSCAN':>18} {'VTR':>18} {'Δ (VTR - Direct)':>18}")
-        print("-" * 80)
-        
-        # Outlier ratio (key metric!)
-        outlier_delta = vtr_row['outlier_ratio'] - direct_row['outlier_ratio']
-        print(f"{'Outlier Ratio':<25} {direct_row['outlier_ratio']:>17.2%} {vtr_row['outlier_ratio']:>17.2%} {outlier_delta:>17.2%}")
-        
-        # Quality metrics
-        cv_delta = vtr_row['coherence_cv'] - direct_row['coherence_cv']
-        print(f"{'C_v Coherence':<25} {direct_row['coherence_cv']:>18.4f} {vtr_row['coherence_cv']:>18.4f} {cv_delta:>+18.4f}")
-        
-        npmi_delta = vtr_row['coherence_npmi'] - direct_row['coherence_npmi']
-        print(f"{'NPMI Coherence':<25} {direct_row['coherence_npmi']:>18.4f} {vtr_row['coherence_npmi']:>18.4f} {npmi_delta:>+18.4f}")
-        
-        wu_delta = vtr_row['word_uniqueness_10'] - direct_row['word_uniqueness_10']
-        print(f"{'Word Uniqueness @10':<25} {direct_row['word_uniqueness_10']:>18.4f} {vtr_row['word_uniqueness_10']:>18.4f} {wu_delta:>+18.4f}")
-        
-        vendi2_delta = vtr_row['vendi_diversity_2'] - direct_row['vendi_diversity_2']
-        print(f"{'Vendi₂ Diversity':<25} {direct_row['vendi_diversity_2']:>18.2f} {vtr_row['vendi_diversity_2']:>18.2f} {vendi2_delta:>+18.2f}")
+        if len(subset) > 0:
+            cv = subset['coherence_cv'].mean()
+            npmi = subset['coherence_npmi'].mean()
+            wu10 = subset['word_uniqueness_10'].mean()
+            vendi2 = subset['vendi_diversity_2'].mean()
+            calls = subset['api_calls'].mean()
+            time_val = subset['reduction_time'].mean()
+            
+            print(f"{target_k:<10} {cv:>10.4f} {npmi:>10.4f} {wu10:>10.4f} {vendi2:>10.2f} {calls:>10.0f} {time_val:>10.1f}")
     
     print("\n" + "="*80)
-    print("KEY FINDINGS")
+    print("KEY INSIGHTS")
     print("="*80)
     
-    mean_outlier_diff = vtr_df['outlier_ratio'].mean() - direct_df['outlier_ratio'].mean()
-    print(f"\n✓ VTR preserves {abs(mean_outlier_diff):.2%} more documents on average")
-    print(f"  (Direct HDBSCAN: {direct_df['outlier_ratio'].mean():.2%} outliers)")
-    print(f"  (VTR:            {vtr_df['outlier_ratio'].mean():.2%} outliers)")
+    total_calls = df['api_calls'].sum()
+    total_time = df['reduction_time'].sum()
+    avg_time_per_call = df['avg_llm_time'].mean()
     
-    mean_cv_diff = vtr_df['coherence_cv'].mean() - direct_df['coherence_cv'].mean()
-    if mean_cv_diff > 0:
-        print(f"\n✓ VTR maintains {mean_cv_diff:+.4f} higher C_v coherence on average")
-    else:
-        print(f"\n⚠ VTR has {mean_cv_diff:.4f} lower C_v coherence on average")
+    print(f"\n✓ Total API Calls: {total_calls:.0f}")
+    print(f"✓ Total Reduction Time: {total_time:.1f}s ({total_time/60:.1f} minutes)")
+    print(f"✓ Average Time per LLM Call: {avg_time_per_call:.2f}s")
+    print(f"\n⚠ For comparison with VTR:")
+    print(f"  - Use Protocol 1 results for VTR performance")
+    print(f"  - Compare quality metrics (C_v, NPMI, Vendi₂) at same k values")
+    print(f"  - VTR reduction time is typically <10s vs {df['reduction_time'].mean():.1f}s for LLM")
     
     print("\n" + "="*80)
