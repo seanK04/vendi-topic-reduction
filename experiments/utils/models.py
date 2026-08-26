@@ -19,15 +19,16 @@ class ModelConfig:
     min_cluster_size: int = 15
     cluster_metric: str = "euclidean"
     cluster_selection_method: Literal["eom", "leaf"] = "eom"
+    # Topic reduction method (applied after clustering)
     reduction_method: Literal["agglomerative", "vendi"] = "agglomerative"
-    vendi_epsilon: float = 1e-5
+    vendi_q: float = 2.0
     seed: int = 42
 
     def __str__(self):
         return (
             f"{self.name} (nn={self.n_neighbors}, "
             f"mcs={self.min_cluster_size}, "
-            f"method={self.reduction_method})"
+            f"reduction={self.reduction_method})"
         )
 
 def create_bertopic_model(
@@ -36,11 +37,11 @@ def create_bertopic_model(
 ) -> BERTopic:
     """
     Create a BERTopic model from a configuration.
-    
+
     Args:
         config: ModelConfig specifying hyperparameters
         embedding_model: Optional pre-loaded SentenceTransformer
-        
+
     Returns:
         Configured BERTopic model
     """
@@ -52,23 +53,22 @@ def create_bertopic_model(
         random_state=config.seed
     )
 
-    hdbscan_model = ProgressHDBSCAN(
+    cluster_model = ProgressHDBSCAN(
         min_cluster_size=config.min_cluster_size,
         metric=config.cluster_metric,
         cluster_selection_method=config.cluster_selection_method,
-        prediction_data=True
+        prediction_data=True,
     )
 
-    # Create BERTopic model
     topic_model = BERTopic(
         embedding_model=embedding_model,
         umap_model=umap_model,
-        hdbscan_model=hdbscan_model,
+        hdbscan_model=cluster_model,
         verbose=False,
         calculate_probabilities=True,
         reduction_method=config.reduction_method,
-        vendi_epsilon=config.vendi_epsilon,
-        top_n_words=25
+        vendi_q=config.vendi_q,
+        top_n_words=25,
     )
 
     return topic_model
@@ -105,22 +105,6 @@ def get_baseline_configs(seeds=[42, 43, 44]):
         configs.append(ModelConfig(
             name=f"vendi_seed{seed}",
             reduction_method="vendi",
-            vendi_epsilon=1e-5,
-            seed=seed
-        ))
-    return configs
-
-def get_vendi_epsilon_configs(epsilons=[1e-5, 1e-4, 1e-3], seed: int = 42):
-    """
-    Get configurations for epsilon-stopping experiments (P2).
-    Tests different epsilon thresholds for automatic stopping.
-    """
-    configs = []
-    for eps in epsilons:
-        configs.append(ModelConfig(
-            name=f"vendi_auto_eps{eps:.0e}",
-            reduction_method="vendi",
-            vendi_epsilon=eps,
             seed=seed
         ))
     return configs
@@ -135,28 +119,18 @@ def print_config(config: ModelConfig):
     print(f"  - n_components: {config.n_components}")
     print(f"  - min_dist: {config.min_dist}")
     print(f"  - metric: {config.metric}")
-    print(f"HDBSCAN:")
+    print(f"Clustering (HDBSCAN):")
     print(f"  - min_cluster_size: {config.min_cluster_size}")
     print(f"  - metric: {config.cluster_metric}")
+    print(f"  - selection_method: {config.cluster_selection_method}")
     print(f"Topic Reduction:")
     print(f"  - method: {config.reduction_method}")
     if config.reduction_method == "vendi":
-        print(f"  - epsilon: {config.vendi_epsilon}")
+        print(f"  - q: {config.vendi_q}")
     print(f"Other:")
     print(f"  - seed: {config.seed}")
     print(f"{'='*60}\n")
 
-
-def get_all_experiment_configs():
-    """
-    Get all configurations for a full experimental run.
-    
-    Returns a dictionary organizing configs by experiment protocol.
-    """
-    return {
-        "P1_fixed_k": get_baseline_configs(seeds=[42, 43, 44]),
-        "P2_epsilon_stopping": get_vendi_epsilon_configs(),
-    }
 
 if __name__ == "__main__":
     # Test default config

@@ -11,15 +11,16 @@ import pandas as pd
 from pathlib import Path
 from typing import List
 
-from experiments.data_loaders import DatasetConfig
-from experiments.models import create_bertopic_model, ModelConfig
-from experiments.metrics import evaluate_model
+from experiments.utils.data_loaders import DatasetConfig
+from experiments.utils.models import create_bertopic_model, ModelConfig
+from experiments.utils.metrics import evaluate_model
 
 
 def run_protocol_1(
     dataset: DatasetConfig,
     target_k_values: List[int] = [25, 50, 100],
     seeds: List[int] = [42, 43, 44],
+    min_cluster_size: int = 15,
     save_dir: str = "experiments/results/p1_fixed_k",
     output_filename: str = None
 ) -> pd.DataFrame:
@@ -31,6 +32,7 @@ def run_protocol_1(
         dataset: DatasetConfig with docs, embeddings, labels
         target_k_values: List of target topic counts
         seeds: List of random seeds for reproducibility
+        min_cluster_size: HDBSCAN min_cluster_size parameter for initial clustering
         save_dir: Directory to save results
         output_filename: Optional custom filename for CSV output. If None, auto-generates as "p1_results_{dataset.name}.csv"
 
@@ -74,6 +76,7 @@ def run_protocol_1(
         config = ModelConfig(
             name=f"base_seed{seed}",
             reduction_method="agglomerative",  # Placeholder, not used in fit
+            min_cluster_size=min_cluster_size,
             seed=seed
         )
         
@@ -101,7 +104,7 @@ def run_protocol_1(
                         config_refit = ModelConfig(
                             name=f"{method}_{emb_name}_k{target_k}_seed{seed}",
                             reduction_method=method,
-                            vendi_epsilon=1e-5,
+                            min_cluster_size=min_cluster_size,
                             seed=seed
                         )
                         model_refit = create_bertopic_model(config_refit)

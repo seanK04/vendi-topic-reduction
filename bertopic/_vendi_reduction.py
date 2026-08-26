@@ -15,8 +15,7 @@ from tqdm import tqdm
 class VendiReducer:
     """Implements Vendi₂-based topic reduction with lookahead algebraic acceleration."""
     
-    def __init__(self, epsilon: float = 1e-5, verbose: bool = False):
-        self.epsilon = epsilon
+    def __init__(self, verbose: bool = False):
         self.verbose = verbose
     
     def compute_vendi2_score(self, T: float, m: int) -> float:
@@ -146,13 +145,8 @@ class VendiReducer:
         self,
         embeddings: np.ndarray,
         topic_sizes: Dict[int, int],
-        target_k: Optional[int] = None,
-        epsilon: Optional[float] = None
+        target_k: Optional[int] = None
     ) -> Dict[int, int]:
-
-        if epsilon is None:
-            epsilon = self.epsilon
-
         # Initialize active topics
         active_topics = sorted(topic_sizes.keys())
         m = len(active_topics)
@@ -188,12 +182,6 @@ class VendiReducer:
                 best_delta, best_T_new, idx_a, idx_b = self.compute_all_deltas_vectorized(
                     K, T, R, G, n_vec
                 )
-
-                # Epsilon stopping
-                if target_k is None and best_delta < -epsilon:
-                    if self.verbose:
-                        print(f"Stopping: ΔVendi={best_delta:.6f} < -ε")
-                    break
 
                 a = active_topics[idx_a]
                 b = active_topics[idx_b]

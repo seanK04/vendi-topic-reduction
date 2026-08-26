@@ -162,7 +162,7 @@ class BERTopic:
         representation_model: BaseRepresentation = None,
         verbose: bool = False,
         reduction_method: str = "agglomerative",
-        vendi_epsilon: float = 1e-5
+        vendi_q: float = 2.0
     ):
         """BERTopic initialization.
 
@@ -233,7 +233,8 @@ class BERTopic:
                                   are supported.
             reduction_method: The method used for topic reduction when nr_topics is specified. 
                               Options: "agglomerative" (default), "vendi"
-            vendi_epsilon: epsilon for vendi clustering in topic reduction
+            vendi_q: Order of the Vendi Score for topic reduction. q=2 uses the
+                     optimized Frobenius norm shortcut; other values use eigendecomposition.
         """
 
         # Topic-based parameters
@@ -256,7 +257,7 @@ class BERTopic:
         if reduction_method not in ["agglomerative", "vendi"]:
             raise ValueError(f"reduction_method must be 'agglomerative' or 'vendi', got '{reduction_method}'")
         self.reduction_method = reduction_method
-        self.vendi_epsilon = vendi_epsilon
+        self.vendi_q = vendi_q
 
         # Embedding model
         self.language = language if not embedding_model else None
@@ -4590,10 +4591,9 @@ class BERTopic:
             if self.nr_topics < initial_nr_topics:
                 if self.reduction_method == "vendi":
                     documents = self._reduce_with_vendi(
-                        documents, 
-                        use_ctfidf, 
-                        target_k=self.nr_topics,
-                        epsilon=self.vendi_epsilon
+                        documents,
+                        use_ctfidf,
+                        target_k=self.nr_topics
                     )
                 elif self.reduction_method == "agglomerative":
                     documents = self._reduce_to_n_topics(documents, use_ctfidf)
@@ -4746,7 +4746,6 @@ class BERTopic:
         documents: pd.DataFrame,
         use_ctfidf: bool = False,
         target_k: int = None,
-        epsilon: float = None,
     ) -> pd.DataFrame:
         """Reduce topics using Vendi diversity score-based merging.
 
@@ -4760,8 +4759,6 @@ class BERTopic:
                        If False, semantic embeddings from the embedding model are used.
             target_k: Target number of topics. If provided, merging continues until
                      this number is reached.
-            epsilon: Stopping threshold for diversity loss. If provided without target_k,
-                    merging stops when ΔVendi < -epsilon.
 
         Returns:
             documents: Updated dataframe with documents and the reduced number of Topics
@@ -4770,11 +4767,6 @@ class BERTopic:
         Reduce to a fixed number of topics:
         ```python
         topic_model.reduce_topics(docs, nr_topics=50, reduction_method="vendi")
-        ```
-
-        Or use epsilon-stopping for automatic reduction:
-        ```python
-        topic_model.reduce_topics(docs, nr_topics="vendi_auto", vendi_epsilon=1e-4)
         ```
         """
         from bertopic._vendi_reduction import VendiReducer
@@ -4797,14 +4789,17 @@ class BERTopic:
             outlier_size = topic_sizes_dict.pop(-1, 0)
 
         # Initialize Vendi reducer
-        vendi_reducer = VendiReducer(epsilon=epsilon if epsilon else 1e-5, verbose=self.verbose)
+        if self.vendi_q == 2.0:
+            vendi_reducer = VendiReducer(verbose=self.verbose)
+        else:
+            from bertopic._vendi_reduction_general import GeneralVendiReducer
+            vendi_reducer = GeneralVendiReducer(q=self.vendi_q, verbose=self.verbose)
 
         # Perform Vendi-based reduction
         cumulative_mapping = vendi_reducer.reduce(
             embeddings=topic_embeddings,
             topic_sizes=topic_sizes_dict,
             target_k=target_k,
-            epsilon=epsilon,
         )
 
         # Add back outlier mapping

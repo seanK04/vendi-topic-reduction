@@ -12,9 +12,9 @@ import pandas as pd
 from pathlib import Path
 from typing import List
 
-from experiments.data_loaders import DatasetConfig
-from experiments.models import create_bertopic_model, ModelConfig
-from experiments.metrics import evaluate_model
+from experiments.utils.data_loaders import DatasetConfig
+from experiments.utils.models import create_bertopic_model, ModelConfig
+from experiments.utils.metrics import evaluate_model
 
 
 def run_protocol_4(
@@ -116,7 +116,6 @@ def run_protocol_4(
                             min_cluster_size=min_cs,
                             cluster_selection_method=sel_method,
                             reduction_method="vendi",
-                            vendi_epsilon=1e-5,
                             seed=seed
                         )
                         model_refit = create_bertopic_model(config_refit)

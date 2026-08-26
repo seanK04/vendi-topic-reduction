@@ -78,6 +78,9 @@ env.bak/
 venv.bak/
 *.lock
 
+# Claude Code local settings
+.claude/settings.local.json
+
 # Artifacts
 .idea
 .idea/
@@ -89,9 +92,6 @@ site/
 
 # Experiment results and data
 experiments/results/
-!experiments/results/.gitkeep
-experiments/results/embeddings/
-experiments/results/*/
 
 # Large datasets (don't upload to GitHub!)
 *.pkl
