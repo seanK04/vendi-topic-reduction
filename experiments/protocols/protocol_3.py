@@ -157,7 +157,7 @@ def run_protocol_3(
         # Reduce to target_k
         if len(set(vtr_model.topics_) - {-1}) > direct_k:
             vtr_reduction_start = time.time()
-            vtr_model.reduce_topics(dataset.docs, nr_topics=direct_k, use_ctfidf=False)
+            vtr_model.reduce_topics(dataset.docs, nr_topics=direct_k, use_ctfidf=True)
             vtr_reduction_time = time.time() - vtr_reduction_start
             vtr_k = len(set(vtr_model.topics_) - {-1})
             vtr_outliers = sum(1 for t in vtr_model.topics_ if t == -1)
